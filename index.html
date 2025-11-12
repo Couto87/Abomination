@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Mini Abomination (HTML/CSS/JS – single file)</title>
+<style>
+  :root { --ui:#1e1e1e; --ink:#e3e3e3; --accent:#9ae66e; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; background:#131313; color:var(--ink); font-family:system-ui,Segoe UI,Roboto,Arial; }
+  #hud {
+    position:fixed; inset:12px auto auto 12px; display:flex; gap:8px; align-items:center;
+    background:rgba(20,20,20,.7); border:1px solid #333; padding:8px 10px; border-radius:10px; backdrop-filter:blur(4px)
+  }
+  #hud b { color:var(--accent) }
+  #help {
+    position:fixed; right:12px; bottom:12px; background:#171717d0; border:1px solid #333; padding:8px 10px; border-radius:10px;
+    font-size:12px; line-height:1.35
+  }
+  canvas { display:block; width:100vw; height:100vh; image-rendering:pixelated; cursor: crosshair; }
+  .badge { padding:.1rem .45rem; border:1px solid #3c3c3c; border-radius:.5rem; background:#0e0e0e; color:#c5c5c5 }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  <span class="badge">WASD: mover</span>
+  <span class="badge">Mouse: mirar</span>
+  <span class="badge">Clique: atirar</span>
+  <span class="badge">Shift: correr</span>
+  <span class="badge">R: recarregar</span>
+  <span>|</span>
+  HP: <b id="hp">100</b> • Munição: <b id="ammo">12</b>/<span id="stash">72</span> • Inimigos: <b id="left">–</b>
+</div>
+
+<div id="help">
+  Mini protótipo isométrico inspirado em <b>Abomination (1999)</b>. Sem imagens externas – tudo desenhado no canvas.<br>
+  Objetivo: elimine os infectados (IA simples). Evite paredes e caixas.
+</div>
+
+<script>
+(() => {
+  // ===== Canvas setup =======================================================
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const DPR = Math.max(1, Math.min(2, devicePixelRatio || 1));
+  function fit() {
+    canvas.width  = Math.floor(innerWidth  * DPR);
+    canvas.height = Math.floor(innerHeight * DPR);
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  addEventListener('resize', fit, {passive:true}); fit();
+
+  // ===== Isometric helpers ==================================================
+  // Tile sizes (screen space)
+  const ISO_W = 64, ISO_H = 32;  // diamond width/height
+  const MAP_W = 40, MAP_H = 40;  // tiles
+  const HALF_W = ISO_W/2, HALF_H = ISO_H/2;
+
+  // world <-> screen conversions (map coords are in tile units)
+  function worldToScreen(wx, wy) {
+    const sx = (wx - wy) * HALF_W + camera.x;
+    const sy = (wx + wy) * HALF_H + camera.y;
+    return {x:sx, y:sy};
+  }
+  function screenToWorld(sx, sy) {
+    const x = ((sy - camera.y)/HALF_H + (sx - camera.x)/HALF_W)/2;
+    const y = ((sy - camera.y)/HALF_H - (sx - camera.x)/HALF_W)/2;
+    return {x,y};
+  }
+
+  // ===== Map generation =====================================================
+  // 0 = floor, 1 = wall, 2 = crate
+  const map = Array.from({length: MAP_H}, (_,y) =>
+    Array.from({length: MAP_W}, (_,x) => {
+      // Perimeter walls
+      if (x===0||y===0||x===MAP_W-1||y===MAP_H-1) return 1;
+      // Random blocks
+      const r = Math.random();
+      if (r < 0.05) return 1;
+      if (r < 0.10) return 2;
+      return 0;
+    })
+  );
+  // Open a plaza in the center
+  for (let y=16; y<24; y++) for (let x=16; x<24; x++) map[y][x]=0;
+
+  function tileIsBlocked(tx,ty){
+    if (tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return true;
+    return map[ty][tx]!==0;
+  }
+
+  // ===== Entities ===========================================================
+  const player = {
+    x: 20, y: 20, r: 0.32,  // radius in tiles
+    hp: 100,
+    speed: 3.2, // tiles per second
+    runMult: 1.6,
+    ammo: 12, mag: 12, stash: 72, reloadTime: 0.9, reloading: 0,
+    fireCd: 0.12, cd: 0
+  };
+
+  const bullets = []; // {x,y,dx,dy,life,from}
+  const enemies = [];
+  const ENEMY_COUNT = 18;
+
+  function spawnEnemies(){
+    enemies.length = 0;
+    for (let i=0;i<ENEMY_COUNT;i++){
+      // spawn away from player
+      let x, y;
+      do {
+        x = (Math.random()* (MAP_W-4)) + 2;
+        y = (Math.random()* (MAP_H-4)) + 2;
+      } while (Math.hypot(x-player.x,y-player.y)<8 || tileIsBlocked(x|0,y|0));
+      enemies.push({x,y,r:0.32,hp:40,speed:2.2, t:Math.random()*6, bleed:0});
+    }
+    document.getElementById('left').textContent = enemies.length;
+  }
+  spawnEnemies();
+
+  // ===== Camera =============================================================
+  const camera = {x: canvas.width/2, y: canvas.height/2, targetX:0, targetY:0};
+  function camFollow(){
+    // center player
+    const s = worldToScreen(player.x, player.y);
+    camera.targetX = canvas.width/(2*DPR) - (s.x - camera.x);
+    camera.targetY = canvas.height/(2*DPR) - (s.y - camera.y);
+    // smooth
+    camera.x += (camera.targetX - camera.x)*0.08;
+    camera.y += (camera.targetY - camera.y)*0.08;
+  }
+
+  // ===== Input ==============================================================
+  const keys = new Set();
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    keys.add(k);
+    if (k === 'r') tryReload();
+  });
+  addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+
+  let mouse = {x:0,y:0, wx: player.x, wy: player.y, down:false};
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = (e.clientX - rect.left) * (canvas.width/rect.width) / DPR;
+    mouse.y = (e.clientY - rect.top)  * (canvas.height/rect.height) / DPR;
+    const w = screenToWorld(mouse.x, mouse.y);
+    mouse.wx = w.x; mouse.wy=w.y;
+  }, {passive:true});
+
+  canvas.addEventListener('mousedown', () => mouse.down = true);
+  canvas.addEventListener('mouseup',   () => mouse.down = false);
+  canvas.addEventListener('mouseleave',() => mouse.down = false);
+
+  // ===== Combat =============================================================
+  function tryReload(){
+    if (player.reloading>0) return;
+    const need = player.mag - player.ammo;
+    if (need>0 && player.stash>0){
+      player.reloading = player.reloadTime;
+      setTimeout(() => {
+        const take = Math.min(need, player.stash);
+        player.ammo += take; player.stash -= take;
+        player.reloading = 0;
+        ui();
+      }, player.reloadTime*1000);
+    }
+  }
+
+  function shoot(){
+    if (player.ammo<=0){ tryReload(); return; }
+    if (player.cd>0 || player.reloading>0) return;
+    const dx = mouse.wx - player.x, dy = mouse.wy - player.y;
+    const len = Math.hypot(dx,dy) || 1;
+    const spread = 0.03; // small random
+    const ang = Math.atan2(dy,dx) + (Math.random()*spread - spread/2);
+    const speed = 10; // tiles/sec
+    bullets.push({x:player.x, y:player.y, dx:Math.cos(ang)*speed, dy:Math.sin(ang)*speed, life:1.2, from:'player'});
+    player.ammo--; player.cd = player.fireCd;
+    ui();
+  }
+
+  // ===== UI updater =========================================================
+  function ui(){
+    document.getElementById('hp').textContent = Math.max(0,player.hp|0);
+    document.getElementById('ammo').textContent = player.ammo;
+    document.getElementById('stash').textContent = player.stash;
+    document.getElementById('left').textContent = enemies.length;
+  }
+  ui();
+
+  // ===== Physics helpers ====================================================
+  function moveWithCollision(ent, vx, vy, dt){
+    let nx = ent.x + vx*dt;
+    let ny = ent.y + vy*dt;
+    // Axis-separately collide with blocked tiles (simple grid AABB vs circle)
+    const r = ent.r;
+    // X
+    const minTX = Math.floor(nx - r), maxTX = Math.floor(nx + r);
+    const minTY = Math.floor(ent.y - r), maxTY = Math.floor(ent.y + r);
+    let blocked = false;
+    for (let ty=minTY; ty<=maxTY; ty++){
+      for (let tx=minTX; tx<=maxTX; tx++){
+        if (tileIsBlocked(tx,ty)) {
+          // if overlapping horizontally, cancel x
+          if (nx > tx-1 && nx < tx+1 && ent.y > ty-1 && ent.y < ty+1) blocked=true;
+        }
+      }
+    }
+    if (blocked) nx = ent.x;
+    // Y
+    const minTX2 = Math.floor(nx - r), maxTX2 = Math.floor(nx + r);
+    const minTY2 = Math.floor(ny - r), maxTY2 = Math.floor(ny + r);
+    blocked = false;
+    for (let ty=minTY2; ty<=maxTY2; ty++){
+      for (let tx=minTX2; tx<=maxTX2; tx++){
+        if (tileIsBlocked(tx,ty)) {
+          if (ny > ty-1 && ny < ty+1 && nx > tx-1 && nx < tx+1) blocked=true;
+        }
+      }
+    }
+    if (blocked) ny = ent.y;
+    ent.x = nx; ent.y = ny;
+  }
+
+  // ===== Main loop ==========================================================
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min(0.033, (now-last)/1000); last = now;
+    update(dt); render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // ===== Update =============================================================
+  function update(dt){
+    camFollow();
+
+    // Player move
+    let dx=0, dy=0;
+    if (keys.has('w')) dy -= 1;
+    if (keys.has('s')) dy += 1;
+    if (keys.has('a')) dx -= 1;
+    if (keys.has('d')) dx += 1;
+    let len = Math.hypot(dx,dy) || 1;
+    const speed = player.speed * (keys.has('shift')?player.runMult:1);
+    moveWithCollision(player, dx/len*speed, dy/len*speed, dt);
+
+    // Shooting
+    if (mouse.down) shoot();
+    if (player.cd>0) player.cd -= dt;
+
+    // Bullets
+    for (let i=bullets.length-1;i>=0;i--){
+      const b = bullets[i];
+      moveWithCollision(b, b.dx, b.dy, dt);
+      b.life -= dt;
+      // remove if hit a wall
+      if (tileIsBlocked(b.x|0, b.y|0)) b.life = -1;
+      if (b.life<=0){ bullets.splice(i,1); continue; }
+      // check hit enemy
+      if (b.from==='player'){
+        for (let j=enemies.length-1;j>=0;j--){
+          const e = enemies[j];
+          if (Math.hypot(e.x-b.x,e.y-b.y) < e.r){
+            e.hp -= 22 + Math.random()*6;
+            e.bleed = 0.3;
+            bullets.splice(i,1);
+            if (e.hp<=0){ enemies.splice(j,1); ui(); }
+            break;
+          }
+        }
+      } else if (b.from==='enemy'){
+        if (Math.hypot(player.x-b.x,player.y-b.y) < player.r){
+          player.hp -= 10;
+          ui();
+          bullets.splice(i,1);
+        }
+      }
+    }
+
+    // Enemies AI (seek + simple avoidance)
+    for (const e of enemies){
+      e.t += dt;
+      // Direction to player
+      let vx = player.x - e.x, vy = player.y - e.y;
+      const d = Math.hypot(vx,vy) || 1;
+      vx/=d; vy/=d;
+
+      // poor-man avoidance: jitter + don't enter blocked tile
+      const jitter = (Math.sin(e.t*3.1+e.x*2)+Math.cos(e.t*2.3+e.y*1.7))*0.15;
+      const ax = vx + jitter*(Math.random()-.5), ay = vy + jitter*(Math.random()-.5);
+
+      moveWithCollision(e, ax*e.speed, ay*e.speed, dt);
+
+      // Attack if close and with line-of-sight (rough)
+      if (d < 8 && Math.random() < 0.015){
+        const ang = Math.atan2(player.y-e.y, player.x-e.x) + (Math.random()*0.1-0.05);
+        bullets.push({x:e.x,y:e.y,dx:Math.cos(ang)*7,dy:Math.sin(ang)*7,life:1.3,from:'enemy'});
+      }
+      e.bleed = Math.max(0, e.bleed-dt);
+    }
+
+    // Game over / win
+    if (player.hp<=0) { resetGame(false); }
+    else if (enemies.length===0) { resetGame(true); }
+  }
+
+  function resetGame(victory){
+    const msg = victory ? "Área contida! Reiniciar?" : "Você caiu… Reiniciar?";
+    if (confirm(msg)){
+      player.x=20; player.y=20; player.hp=100; player.ammo=12; player.stash=72; bullets.length=0;
+      spawnEnemies(); ui();
+    } else {
+      // pause "forever"
+      last = performance.now();
+    }
+  }
+
+  // ===== Rendering ==========================================================
+  function drawDiamond(cx, cy, w=ISO_W, h=ISO_H, fill, stroke){
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - h/2);
+    ctx.lineTo(cx + w/2, cy);
+    ctx.lineTo(cx, cy + h/2);
+    ctx.lineTo(cx - w/2, cy);
+    ctx.closePath();
+    if (fill){ ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke){ ctx.strokeStyle = stroke; ctx.stroke(); }
+  }
+
+  function render(){
+    ctx.clearRect(0,0,canvas.width/DPR,canvas.height/DPR);
+
+    // Draw floor (only visible region)
+    const viewPad = 2;
+    const topLeft   = screenToWorld(-ISO_W*viewPad, -ISO_H*viewPad);
+    const botRight  = screenToWorld(canvas.width/DPR + ISO_W*viewPad, canvas.height/DPR + ISO_H*viewPad);
+    const minX = Math.max(0, Math.floor(topLeft.x)-1);
+    const maxX = Math.min(MAP_W-1, Math.ceil(botRight.x)+1);
+    const minY = Math.max(0, Math.floor(topLeft.y)-1);
+    const maxY = Math.min(MAP_H-1, Math.ceil(botRight.y)+1);
+
+    // ground
+    for (let y=minY; y<=maxY; y++){
+      for (let x=minX; x<=maxX; x++){
+        const {x:sx,y:sy} = worldToScreen(x, y);
+        const isDark = ((x+y)&1)===0;
+        drawDiamond(sx, sy, ISO_W, ISO_H, isDark ? '#3a3a3a' : '#414141');
+        // edges
+        ctx.strokeStyle = '#2b2b2b'; ctx.lineWidth = 1;
+        drawDiamond(sx, sy, ISO_W, ISO_H, null, '#2b2b2b');
+
+        const t = map[y][x];
+        if (t===1){ // wall block
+          // top
+          drawDiamond(sx, sy-20, ISO_W, ISO_H, '#5a5a5a', '#222');
+          // sides
+          ctx.fillStyle = '#4a4a4a';
+          ctx.beginPath(); // left
+          ctx.moveTo(sx, sy-ISO_H/2);
+          ctx.lineTo(sx-ISO_W/2, sy);
+          ctx.lineTo(sx-ISO_W/2, sy-20);
+          ctx.lineTo(sx, sy-ISO_H/2-20);
+          ctx.closePath(); ctx.fill();
+
+          ctx.fillStyle = '#616161';
+          ctx.beginPath(); // right
+          ctx.moveTo(sx, sy-ISO_H/2);
+          ctx.lineTo(sx+ISO_W/2, sy);
+          ctx.lineTo(sx+ISO_W/2, sy-20);
+          ctx.lineTo(sx, sy-ISO_H/2-20);
+          ctx.closePath(); ctx.fill();
+        } else if (t===2){ // crate
+          ctx.fillStyle = '#82613a';
+          drawDiamond(sx, sy-10, ISO_W*0.6, ISO_H*0.6, '#8b6b3e', '#2a1b0e');
+          ctx.fillStyle = '#a17b49';
+          drawDiamond(sx, sy-6, ISO_W*0.6, ISO_H*0.6, null, '#00000020');
+        }
+      }
+    }
+
+    // Sort entities by screen Y (isometric depth)
+    const drawables = [];
+    drawables.push({type:'player', ref:player, sy: worldToScreen(player.x,player.y).y});
+    for (const e of enemies) drawables.push({type:'enemy', ref:e, sy: worldToScreen(e.x,e.y).y});
+    for (const b of bullets) drawables.push({type:'bullet', ref:b, sy: worldToScreen(b.x,b.y).y});
+    drawables.sort((a,b)=>a.sy-b.sy);
+
+    // Draw
+    for (const d of drawables){
+      if (d.type==='bullet'){
+        const b = d.ref; const s = worldToScreen(b.x,b.y);
+        ctx.fillStyle = b.from==='player' ? '#afff93' : '#ffb3b3';
+        ctx.beginPath(); ctx.arc(s.x, s.y-10, 3, 0, Math.PI*2); ctx.fill();
+        continue;
+      }
+
+      if (d.type==='enemy'){
+        const e = d.ref; const s = worldToScreen(e.x,e.y);
+        // body
+        drawDiamond(s.x, s.y-8, 22, 14, '#8d3940', '#2c0f12');
+        // head
+        ctx.fillStyle = '#c97a6f'; ctx.beginPath();
+        ctx.arc(s.x, s.y-18, 6, 0, Math.PI*2); ctx.fill();
+        // health bar
+        const w=26, h=4, p = Math.max(0,e.hp)/40;
+        ctx.fillStyle = '#00000090'; ctx.fillRect(s.x-w/2, s.y-30, w, h);
+        ctx.fillStyle = '#6be36b'; ctx.fillRect(s.x-w/2, s.y-30, w*p, h);
+        // blood flash
+        if (e.bleed>0){
+          ctx.fillStyle = `rgba(200,0,0,${e.bleed})`;
+          drawDiamond(s.x, s.y-8, 24, 16, ctx.fillStyle);
+        }
+        continue;
+      }
+
+      // player
+      const p = d.ref; const s = worldToScreen(p.x,p.y);
+      // body suit
+      drawDiamond(s.x, s.y-8, 24, 16, '#7dcf6b', '#1c2a13');
+      // head
+      ctx.fillStyle = '#e0c7a2'; ctx.beginPath(); ctx.arc(s.x, s.y-18, 6, 0, Math.PI*2); ctx.fill();
+      // gun line
+      const gx = mouse.wx-p.x, gy = mouse.wy-p.y;
+      const gl = Math.hypot(gx,gy) || 1; const ux=gx/gl, uy=gy/gl;
+      ctx.strokeStyle = '#b4ff9a'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y-14);
+      ctx.lineTo(s.x + ux*18, s.y-14 + uy*18);
+      ctx.stroke();
+      // HP bar
+      const w=28, h=5, pHP=Math.max(0,player.hp)/100;
+      ctx.fillStyle = '#000000a0'; ctx.fillRect(s.x-w/2, s.y-32, w, h);
+      ctx.fillStyle = '#6be36b'; ctx.fillRect(s.x-w/2, s.y-32, w*pHP, h);
+    }
+
+    // Crosshair
+    ctx.strokeStyle = '#adff86'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 10, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mouse.x-14, mouse.y); ctx.lineTo(mouse.x-3, mouse.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mouse.x+14, mouse.y); ctx.lineTo(mouse.x+3, mouse.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mouse.x, mouse.y-14); ctx.lineTo(mouse.x, mouse.y-3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mouse.x, mouse.y+14); ctx.lineTo(mouse.x, mouse.y+3); ctx.stroke();
+  }
+})();
+</script>
+</body>
+</html>
