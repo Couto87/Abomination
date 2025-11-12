@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Mini Abomination – single file (munição extra + faca)</title>
+<title>Mini Abomination – single file (fix: travamento de teclas/disparo)</title>
 <style>
   :root { --ui:#1e1e1e; --ink:#e3e3e3; --accent:#9ae66e; }
   * { box-sizing:border-box; }
@@ -36,8 +36,8 @@
 </div>
 
 <div id="help">
-  Prototipo isométrico inspirado em <b>Abomination (1999)</b> — agora com
-  <b>munição extra pelo cenário</b> e <b>faca</b> (use <b>F</b> ou clique sem munição).
+  Prototipo isométrico com <b>munição extra</b> e <b>faca</b>. <br>
+  <i>Correção aplicada:</i> limpar entradas (teclas/mouse) ao perder/pausar/voltar do prompt para evitar tiro/movimento travado.
 </div>
 
 <script>
@@ -54,8 +54,8 @@
   addEventListener('resize', fit, {passive:true}); fit();
 
   // ===== Isometric helpers ==================================================
-  const ISO_W = 64, ISO_H = 32;    // diamond size
-  const MAP_W = 40, MAP_H = 40;    // tiles
+  const ISO_W = 64, ISO_H = 32;
+  const MAP_W = 40, MAP_H = 40;
   const HALF_W = ISO_W/2, HALF_H = ISO_H/2;
 
   function worldToScreen(wx, wy) {
@@ -69,18 +69,18 @@
     return {x,y};
   }
 
-  // ===== Map generation =====================================================
+  // ===== Map ================================================================
   // 0 = floor, 1 = wall, 2 = crate
   const map = Array.from({length: MAP_H}, (_,y) =>
     Array.from({length: MAP_W}, (_,x) => {
-      if (x===0||y===0||x===MAP_W-1||y===MAP_H-1) return 1; // bordas
+      if (x===0||y===0||x===MAP_W-1||y===MAP_H-1) return 1;
       const r = Math.random();
       if (r < 0.05) return 1;
       if (r < 0.10) return 2;
       return 0;
     })
   );
-  for (let y=16; y<24; y++) for (let x=16; x<24; x++) map[y][x]=0; // praça central
+  for (let y=16; y<24; y++) for (let x=16; x<24; x++) map[y][x]=0;
 
   function tileIsBlocked(tx,ty){
     if (tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return true;
@@ -98,12 +98,12 @@
     knife: {range: 1.1, arc: Math.PI*0.9, damage: 28, cd: 0.45, timer: 0}
   };
 
-  const bullets = []; // {x,y,dx,dy,life,from}
+  const bullets = [];
   const enemies = [];
   const ENEMY_COUNT = 18;
 
-  // Ammo packs (munição extra no cenário)
-  const ammoPacks = []; // {x,y,amount,respawnAt?:time, active:bool}
+  // Ammo packs
+  const ammoPacks = [];
   const AMMO_PACKS_COUNT = 14;
 
   function rndFreeSpot(minDist=0){
@@ -144,8 +144,18 @@
     camera.y += (camera.targetY - camera.y)*0.08;
   }
 
-  // ===== Input ==============================================================
+  // ===== Input (FIX: limpeza de input) =====================================
   const keys = new Set();
+  let reloadTimeout = null;
+  function clearInput() {
+    keys.clear();
+    mouse.down = false;
+    // cancelar recarga pendente
+    if (reloadTimeout){ clearTimeout(reloadTimeout); reloadTimeout = null; }
+    player.reloading = 0;
+    player.cd = 0;
+    player.knife.timer = 0;
+  }
   addEventListener('keydown', e => {
     const k = e.key.toLowerCase();
     keys.add(k);
@@ -153,6 +163,11 @@
     if (k === 'f') slash();
   });
   addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+  // Se perder foco da janela ou aba ficar oculta, limpa entradas (corrige travas)
+  addEventListener('blur', clearInput);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') clearInput();
+  });
 
   let mouse = {x:0,y:0, wx: player.x, wy: player.y, down:false};
   canvas.addEventListener('mousemove', e => {
@@ -162,10 +177,8 @@
     const w = screenToWorld(mouse.x, mouse.y);
     mouse.wx = w.x; mouse.wy=w.y;
   }, {passive:true});
-
   canvas.addEventListener('mousedown', () => {
     mouse.down = true;
-    // se sem munição: faca
     if (player.ammo<=0 && player.stash<=0) slash();
   });
   canvas.addEventListener('mouseup',   () => mouse.down = false);
@@ -177,10 +190,10 @@
     const need = player.mag - player.ammo;
     if (need>0 && player.stash>0){
       player.reloading = player.reloadTime;
-      setTimeout(() => {
+      reloadTimeout = setTimeout(() => {
         const take = Math.min(need, player.stash);
         player.ammo += take; player.stash -= take;
-        player.reloading = 0; ui();
+        player.reloading = 0; reloadTimeout = null; ui();
       }, player.reloadTime*1000);
     }
   }
@@ -190,27 +203,24 @@
     if (player.cd>0 || player.reloading>0) return;
     const dx = mouse.wx - player.x, dy = mouse.wy - player.y;
     const ang = Math.atan2(dy,dx) + (Math.random()*0.03 - 0.015);
-    const speed = 10; // tiles/sec
+    const speed = 10;
     bullets.push({x:player.x, y:player.y, dx:Math.cos(ang)*speed, dy:Math.sin(ang)*speed, life:1.2, from:'player'});
     player.ammo--; player.cd = player.fireCd; ui();
   }
 
-  // Faca (melee). Usa arco à frente do jogador ou direção do mouse
   function slash(){
     if (player.knife.timer>0 || player.reloading>0) return;
     player.knife.timer = player.knife.cd;
-
     const dir = Math.atan2(mouse.wy-player.y, mouse.wx-player.x);
     const range = player.knife.range;
     const halfArc = player.knife.arc/2;
-
     for (let i=enemies.length-1;i>=0;i--){
       const e = enemies[i];
       const dx = e.x-player.x, dy = e.y-player.y;
       const dist = Math.hypot(dx,dy);
       if (dist > range + e.r) continue;
       const ang = Math.atan2(dy,dx);
-      let diff = Math.atan2(Math.sin(ang-dir), Math.cos(ang-dir)); // [-pi,pi]
+      const diff = Math.atan2(Math.sin(ang-dir), Math.cos(ang-dir));
       if (Math.abs(diff) <= halfArc) {
         e.hp -= player.knife.damage + Math.random()*6;
         e.bleed = 0.35;
@@ -219,7 +229,7 @@
     }
   }
 
-  // ===== UI updater =========================================================
+  // ===== UI ================================================================
   function ui(){
     document.getElementById('hp').textContent = Math.max(0,player.hp|0);
     document.getElementById('ammo').textContent = player.ammo;
@@ -228,32 +238,31 @@
   }
   ui();
 
-  // ===== Physics helpers ====================================================
+  // ===== Physics ===========================================================
   function moveWithCollision(ent, vx, vy, dt){
     let nx = ent.x + vx*dt;
     let ny = ent.y + vy*dt;
     const r = ent.r;
-    // collide X
     let blocked=false;
     for (let ty=Math.floor(ent.y-r); ty<=Math.floor(ent.y+r); ty++)
       for (let tx=Math.floor(nx-r); tx<=Math.floor(nx+r); tx++)
         if (tileIsBlocked(tx,ty)) blocked=true;
     if (blocked) nx = ent.x;
-    // collide Y
     blocked=false;
     for (let ty=Math.floor(ny-r); ty<=Math.floor(ny+r); ty++)
       for (let tx=Math.floor(nx-r); tx<=Math.floor(nx+r); tx++)
         if (tileIsBlocked(tx,ty)) blocked=true;
     if (blocked) ny = ent.y;
-
     ent.x = nx; ent.y = ny;
   }
 
-  // ===== Main loop ==========================================================
+  // ===== Loop ===============================================================
   let last = performance.now();
+  let paused = false; // FIX: pausar jogo quando usuário não reinicia
   function loop(now){
     const dt = Math.min(0.033, (now-last)/1000); last = now;
-    update(dt); render();
+    if (!paused) { update(dt); }
+    render();
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
@@ -264,7 +273,7 @@
     tNow += dt;
     camFollow();
 
-    // Player move
+    // movimento
     let dx=0, dy=0;
     if (keys.has('w')) dy -= 1;
     if (keys.has('s')) dy += 1;
@@ -274,12 +283,11 @@
     const speed = player.speed * (keys.has('shift')?player.runMult:1);
     moveWithCollision(player, dx/len*speed, dy/len*speed, dt);
 
-    // Shooting / knife
     if (mouse.down) shoot();
     if (player.cd>0) player.cd -= dt;
     if (player.knife.timer>0) player.knife.timer -= dt;
 
-    // Bullets
+    // projéteis
     for (let i=bullets.length-1;i>=0;i--){
       const b = bullets[i];
       moveWithCollision(b, b.dx, b.dy, dt);
@@ -305,14 +313,13 @@
       }
     }
 
-    // Enemies AI
+    // IA
     for (const e of enemies){
       e.t += dt;
       let vx = player.x - e.x, vy = player.y - e.y;
       const d = Math.hypot(vx,vy) || 1; vx/=d; vy/=d;
       const jitter = (Math.sin(e.t*3.1+e.x*2)+Math.cos(e.t*2.3+e.y*1.7))*0.15;
       moveWithCollision(e, (vx + jitter*(Math.random()-.5))*e.speed, (vy + jitter*(Math.random()-.5))*e.speed, dt);
-
       if (d < 8 && Math.random() < 0.015){
         const ang = Math.atan2(player.y-e.y, player.x-e.x) + (Math.random()*0.1-0.05);
         bullets.push({x:e.x,y:e.y,dx:Math.cos(ang)*7,dy:Math.sin(ang)*7,life:1.3,from:'enemy'});
@@ -320,7 +327,7 @@
       e.bleed = Math.max(0, e.bleed-dt);
     }
 
-    // Pick up ammo packs
+    // pegar munição
     for (const pack of ammoPacks){
       if (!pack.active){
         if (tNow >= pack.respawnAt){
@@ -330,28 +337,33 @@
         }
         continue;
       }
-      const dist = Math.hypot(pack.x-player.x, pack.y-player.y);
-      if (dist < 0.7){
-        // recolhe p/ reserva
-        player.stash += pack.amount;
-        ui();
+      if (Math.hypot(pack.x-player.x, pack.y-player.y) < 0.7){
+        player.stash += pack.amount; ui();
         pack.active = false;
-        pack.respawnAt = tNow + 25 + Math.random()*15; // 25–40s
+        pack.respawnAt = tNow + 25 + Math.random()*15;
       }
     }
 
     // Game over / win
-    if (player.hp<=0) { resetGame(false); }
-    else if (enemies.length===0) { resetGame(true); }
+    if (player.hp<=0) { endGame(false); }
+    else if (enemies.length===0) { endGame(true); }
   }
 
-  function resetGame(victory){
+  function endGame(victory){
+    paused = true;               // FIX: pausa o jogo
+    clearInput();                // FIX: limpa teclas/mouse para evitar "travado"
     const msg = victory ? "Área contida! Reiniciar?" : "Você caiu… Reiniciar?";
-    if (confirm(msg)){
-      player.x=20; player.y=20; player.hp=100;
-      player.ammo=12; player.stash=72; bullets.length=0;
-      spawnEnemies(); spawnAmmoPacks(); ui();
-    }
+    const again = confirm(msg);
+    if (again) resetGame();
+  }
+
+  function resetGame(){
+    player.x=20; player.y=20; player.hp=100;
+    player.ammo=12; player.stash=72; player.cd=0; player.knife.timer=0; player.reloading=0;
+    bullets.length=0;
+    spawnEnemies(); spawnAmmoPacks(); ui();
+    clearInput();          // FIX: garante que não volte atirando
+    paused = false;
   }
 
   // ===== Rendering ==========================================================
@@ -368,8 +380,6 @@
 
   function render(){
     ctx.clearRect(0,0,canvas.width/DPR,canvas.height/DPR);
-
-    // Visible region bounds
     const viewPad = 2;
     const topLeft   = screenToWorld(-ISO_W*viewPad, -ISO_H*viewPad);
     const botRight  = screenToWorld(canvas.width/DPR + ISO_W*viewPad, canvas.height/DPR + ISO_H*viewPad);
@@ -378,33 +388,31 @@
     const minY = Math.max(0, Math.floor(topLeft.y)-1);
     const maxY = Math.min(MAP_H-1, Math.ceil(botRight.y)+1);
 
-    // ground + blocks
     for (let y=minY; y<=maxY; y++){
       for (let x=minX; x<=maxX; x++){
         const {x:sx,y:sy} = worldToScreen(x, y);
         const isDark = ((x+y)&1)===0;
         drawDiamond(sx, sy, ISO_W, ISO_H, isDark ? '#3a3a3a' : '#414141');
-        ctx.strokeStyle = '#2b2b2b'; ctx.lineWidth = 1;
         drawDiamond(sx, sy, ISO_W, ISO_H, null, '#2b2b2b');
 
         const t = map[y][x];
-        if (t===1){ // wall
+        if (t===1){
           drawDiamond(sx, sy-20, ISO_W, ISO_H, '#5a5a5a', '#222');
           ctx.fillStyle = '#4a4a4a';
-          ctx.beginPath(); // left
+          ctx.beginPath();
           ctx.moveTo(sx, sy-ISO_H/2);
           ctx.lineTo(sx-ISO_W/2, sy);
           ctx.lineTo(sx-ISO_W/2, sy-20);
           ctx.lineTo(sx, sy-ISO_H/2-20);
           ctx.closePath(); ctx.fill();
           ctx.fillStyle = '#616161';
-          ctx.beginPath(); // right
+          ctx.beginPath();
           ctx.moveTo(sx, sy-ISO_H/2);
           ctx.lineTo(sx+ISO_W/2, sy);
           ctx.lineTo(sx+ISO_W/2, sy-20);
           ctx.lineTo(sx, sy-ISO_H/2-20);
           ctx.closePath(); ctx.fill();
-        } else if (t===2){ // crate
+        } else if (t===2){
           ctx.fillStyle = '#82613a';
           drawDiamond(sx, sy-10, ISO_W*0.6, ISO_H*0.6, '#8b6b3e', '#2a1b0e');
           ctx.fillStyle = '#a17b49';
@@ -413,29 +421,26 @@
       }
     }
 
-    // Draw ammo packs (as pequenas caixas azuis esverdeadas)
+    // ammo packs
     for (const p of ammoPacks){
       if (!p.active) continue;
       const s = worldToScreen(p.x,p.y);
       const pulse = 0.65 + 0.35*Math.sin(performance.now()/300);
       drawDiamond(s.x, s.y-8, ISO_W*0.4, ISO_H*0.4, `rgba(90,180,220,${0.85})`, '#0c2a33');
-      // brilho
       ctx.fillStyle = `rgba(120,220,255,${0.15*pulse})`;
       drawDiamond(s.x, s.y, ISO_W*0.7, ISO_H*0.7, ctx.fillStyle);
-      // símbolo "+"
       ctx.fillStyle = '#dff9ff';
       ctx.fillRect(s.x-3, s.y-14, 6, 2);
       ctx.fillRect(s.x-1, s.y-18, 2, 8);
     }
 
-    // Sort entities by screen Y
+    // depth sort
     const drawables = [];
     drawables.push({type:'player', ref:player, sy: worldToScreen(player.x,player.y).y});
     for (const e of enemies) drawables.push({type:'enemy', ref:e, sy: worldToScreen(e.x,e.y).y});
     for (const b of bullets) drawables.push({type:'bullet', ref:b, sy: worldToScreen(b.x,b.y).y});
     drawables.sort((a,b)=>a.sy-b.sy);
 
-    // Draw entities
     for (const d of drawables){
       if (d.type==='bullet'){
         const b = d.ref; const s = worldToScreen(b.x,b.y);
@@ -445,51 +450,42 @@
       }
       if (d.type==='enemy'){
         const e = d.ref; const s = worldToScreen(e.x,e.y);
-        drawDiamond(s.x, s.y-8, 22, 14, '#8d3940', '#2c0f12'); // corpo
-        ctx.fillStyle = '#c97a6f'; ctx.beginPath(); ctx.arc(s.x, s.y-18, 6, 0, Math.PI*2); ctx.fill(); // cabeça
-        const w=26, h=4, p = Math.max(0,e.hp)/40;             // barra de vida
+        drawDiamond(s.x, s.y-8, 22, 14, '#8d3940', '#2c0f12');
+        ctx.fillStyle = '#c97a6f'; ctx.beginPath(); ctx.arc(s.x, s.y-18, 6, 0, Math.PI*2); ctx.fill();
+        const w=26, h=4, p = Math.max(0,e.hp)/40;
         ctx.fillStyle = '#00000090'; ctx.fillRect(s.x-w/2, s.y-30, w, h);
         ctx.fillStyle = '#6be36b'; ctx.fillRect(s.x-w/2, s.y-30, w*p, h);
-        if (e.bleed>0){                                       // hit flash
+        if (e.bleed>0){
           ctx.fillStyle = `rgba(200,0,0,${e.bleed})`;
           drawDiamond(s.x, s.y-8, 24, 16, ctx.fillStyle);
         }
         continue;
       }
-      // player
       const p = d.ref; const s = worldToScreen(p.x,p.y);
-      drawDiamond(s.x, s.y-8, 24, 16, '#7dcf6b', '#1c2a13'); // corpo
-      ctx.fillStyle = '#e0c7a2'; ctx.beginPath(); ctx.arc(s.x, s.y-18, 6, 0, Math.PI*2); ctx.fill(); // cabeça
+      drawDiamond(s.x, s.y-8, 24, 16, '#7dcf6b', '#1c2a13');
+      ctx.beginPath(); ctx.fillStyle = '#e0c7a2'; ctx.arc(s.x, s.y-18, 6, 0, Math.PI*2); ctx.fill();
 
-      // Arma/faca direção
-      const gx = mouse.wx-p.x, gy = mouse.wy-p.y;
+      const gx = (mouse.wx-p.x), gy = (mouse.wy-p.y);
       const gl = Math.hypot(gx,gy) || 1; const ux=gx/gl, uy=gy/gl;
 
-      // Se faca em uso, desenha arco de corte
       if (p.knife.timer>0 && p.knife.timer>p.knife.cd-0.18){
-        ctx.strokeStyle = '#fff7a8';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
+        ctx.strokeStyle = '#fff7a8'; ctx.lineWidth = 3;
         const baseX = s.x, baseY = s.y-14;
         const start = Math.atan2(uy,ux) - p.knife.arc/2;
         const end   = start + p.knife.arc;
-        const R = 28;
-        ctx.arc(baseX, baseY, R, start, end);
-        ctx.stroke();
+        ctx.beginPath(); ctx.arc(baseX, baseY, 28, start, end); ctx.stroke();
       } else {
-        // arma (linha)
         ctx.strokeStyle = '#b4ff9a'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.moveTo(s.x, s.y-14);
         ctx.lineTo(s.x + ux*18, s.y-14 + uy*18); ctx.stroke();
       }
 
-      // HP
       const w=28, h=5, pHP=Math.max(0,player.hp)/100;
       ctx.fillStyle = '#000000a0'; ctx.fillRect(s.x-w/2, s.y-32, w, h);
       ctx.fillStyle = '#6be36b'; ctx.fillRect(s.x-w/2, s.y-32, w*pHP, h);
     }
 
-    // Crosshair
+    // crosshair
     ctx.strokeStyle = '#adff86'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 10, 0, Math.PI*2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(mouse.x-14, mouse.y); ctx.lineTo(mouse.x-3, mouse.y); ctx.stroke();
